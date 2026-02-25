@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +25,51 @@ const (
 )
 
 var version = "dev"
+
+func resolveVersion() string {
+	if trimmed := strings.TrimSpace(version); trimmed != "" && trimmed != "dev" {
+		return trimmed
+	}
+
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		if buildVersion := normalizeBuildVersion(buildInfo.Main.Version); buildVersion != "" {
+			return buildVersion
+		}
+	}
+
+	if fileVersion := resolveVersionFromFile(); fileVersion != "" {
+		return fileVersion
+	}
+
+	return "dev"
+}
+
+func normalizeBuildVersion(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "(devel)" {
+		return ""
+	}
+	return strings.TrimPrefix(trimmed, "v")
+}
+
+func resolveVersionFromFile() string {
+	paths := []string{"VERSION"}
+	if executablePath, err := os.Executable(); err == nil {
+		paths = append(paths, filepath.Join(filepath.Dir(executablePath), "VERSION"))
+	}
+
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if trimmed := strings.TrimSpace(string(content)); trimmed != "" {
+			return strings.TrimPrefix(trimmed, "v")
+		}
+	}
+
+	return ""
+}
 
 type cliConfig struct {
 	showVersion bool
@@ -141,6 +188,8 @@ func parseFlags() (cliConfig, error) {
 }
 
 func main() {
+	appVersion := resolveVersion()
+
 	config, err := parseFlags()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "usage error: %v\n", err)
@@ -148,7 +197,7 @@ func main() {
 	}
 
 	if config.showVersion {
-		fmt.Println(version)
+		fmt.Println(appVersion)
 		os.Exit(exitSuccess)
 	}
 
@@ -167,7 +216,7 @@ func main() {
 	}
 
 	if !config.quiet {
-		fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", version, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once)
+		fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once)
 	}
 
 	checker := check.NewChecker(check.Options{

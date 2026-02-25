@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
@@ -38,9 +38,18 @@ jobs:
           cache: true
 
       - name: Build artifact
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+          if [ -z "$FILE_VERSION" ]; then
+            echo "VERSION file is empty"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "Tag version (${GITHUB_REF_NAME}) does not match VERSION file (${FILE_VERSION})"
+            exit 1
+          fi
+
           mkdir -p dist
           EXT=""
           ARCHIVE_EXT="tar.gz"
@@ -49,9 +58,9 @@ jobs:
             ARCHIVE_EXT="zip"
           fi
 
-          BIN_NAME="beepboop-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
+          BIN_NAME="beepboop-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/${BIN_NAME}" ./cmd/beepboop
+            go build -trimpath -ldflags="-s -w -X main.version=${FILE_VERSION}" -o "dist/${BIN_NAME}" ./cmd/beepboop
 
           if [ "${ARCHIVE_EXT}" = "zip" ]; then
             (cd dist && zip "${BIN_NAME%.exe}.zip" "${BIN_NAME}")

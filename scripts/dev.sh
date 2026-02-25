@@ -28,11 +28,17 @@ esac
 
 mkdir -p dist/local
 
+VERSION="$(tr -d '[:space:]' < VERSION)"
+if [[ -z "$VERSION" ]]; then
+  echo "VERSION file is empty"
+  exit 1
+fi
+
 echo "Running tests..."
 go test ./...
 
 echo "Building beepboop for host ($GOOS/$GOARCH)..."
-GOOS="$GOOS" GOARCH="$GOARCH" go build -o "dist/local/beepboop" ./cmd/beepboop
+GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags "-X main.version=$VERSION" -o "dist/local/beepboop" ./cmd/beepboop
 
 echo "Done. Binary: dist/local/beepboop"
 echo "Try: ./dist/local/beepboop --target 1.1.1.1 --mode icmp --once"

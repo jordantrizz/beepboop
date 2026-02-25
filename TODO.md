@@ -2,12 +2,6 @@
 Track remaining work only. Initial build implementation history lives in `BUILD.md`.
 
 ## Small Changes
-- [x] Colorized terminal output
-	- [x] Define a minimal color scheme for `up`, `down`, `waiting`, and `error` states
-	- [x] Add ANSI color output with automatic fallback to plain text when color is disabled/not supported
-	- [x] Add `--no-color` flag to force plain output
-	- [x] Update README examples/screenshots to reflect colorized output behavior
-
 - [ ] Compact runtime progress display
 	- [ ] Track and display run `start time`
 	- [ ] Track and display `current time` and `elapsed duration`

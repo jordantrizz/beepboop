@@ -1,6 +1,20 @@
+![beepboop header](images/beepboop-repo.png)
+
+[![CI](https://github.com/jordantrizz/beepboop/actions/workflows/ci.yml/badge.svg)](https://github.com/jordantrizz/beepboop/actions/workflows/ci.yml)
+[![Release Workflow](https://github.com/jordantrizz/beepboop/actions/workflows/release.yml/badge.svg)](https://github.com/jordantrizz/beepboop/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/jordantrizz/beepboop?display_name=tag&sort=semver)](https://github.com/jordantrizz/beepboop/releases/latest)
+[![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://github.com/jordantrizz/beepboop/blob/main/go.mod)
+
+
 # beepboop
 
-`beepboop` is a cross-platform terminal command that checks a host or website and emits a terminal beep when the target is up.
+**beepboop** is a cross-platform terminal command that checks a host or website and emits a terminal beep when the target is up.
+
+# Donate
+If you like any of the scripts or tools, please consider donating to help support the development of these tools.
+
+[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://ko-fi.com/jordantrask)
+[![ManagingWP](https://i.imgur.com/x5SjITX.png)](https://managingwp.io/sponsor)
 
 ## Features
 - Checks host/IP reachability with `icmp`
@@ -52,7 +66,8 @@ Make sure your Go bin directory is in `PATH` (commonly `$(go env GOPATH)/bin` or
 ```bash
 git clone https://github.com/jordantrizz/beepboop.git
 cd beepboop
-go build -o beepboop ./cmd/beepboop
+VERSION=$(tr -d '[:space:]' < VERSION)
+go build -ldflags "-X main.version=${VERSION}" -o beepboop ./cmd/beepboop
 ```
 
 ## Usage
@@ -129,7 +144,7 @@ go test ./...
 
 ## CI and Releases
 - CI matrix builds run on pushes and pull requests via [ci.yml](.github/workflows/ci.yml)
-- Tagged releases (`v*`) publish multi-arch artifacts and checksums via [release.yml](.github/workflows/release.yml)
+- Tagged releases (for example `0.2.0`) publish multi-arch artifacts and checksums via [release.yml](.github/workflows/release.yml)
 
 ## Notes
 Terminal beep behavior depends on terminal settings. If you do not hear a sound, verify your terminal bell/alert preferences.
