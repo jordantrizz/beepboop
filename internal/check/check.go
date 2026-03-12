@@ -20,6 +20,8 @@ const (
 	ModeICMP  Mode = "icmp"
 	ModeHTTP  Mode = "http"
 	ModeHTTPS Mode = "https"
+	ModeTCP   Mode = "tcp"
+	ModeUDP   Mode = "udp"
 )
 
 type Options struct {
@@ -115,7 +117,20 @@ func ResolveModeAndTarget(modeText string, target string) (Mode, string, error) 
 			}
 			return ModeHTTPS, trimmedTarget, nil
 		}
+		// If the target looks like host:port, use TCP mode automatically.
+		if host, port, splitErr := net.SplitHostPort(trimmedTarget); splitErr == nil && host != "" && port != "" {
+			return ModeTCP, trimmedTarget, nil
+		}
 		return ModeICMP, trimmedTarget, nil
+	case "tcp", "udp":
+		host, port, err := net.SplitHostPort(trimmedTarget)
+		if err != nil || host == "" || port == "" {
+			return "", "", fmt.Errorf("--mode=%s target must include host and port (e.g. host:port)", modeText)
+		}
+		if strings.ToLower(modeText) == "tcp" {
+			return ModeTCP, trimmedTarget, nil
+		}
+		return ModeUDP, trimmedTarget, nil
 	default:
 		return "", "", fmt.Errorf("unsupported mode: %s", modeText)
 	}
@@ -154,6 +169,10 @@ func (checker *Checker) CheckOnce(ctx context.Context) (bool, error) {
 		return checker.checkICMP(ctx)
 	case ModeHTTP, ModeHTTPS:
 		return checker.checkHTTP(ctx)
+	case ModeTCP:
+		return checker.checkTCP(ctx)
+	case ModeUDP:
+		return checker.checkUDP(ctx)
 	default:
 		return false, fmt.Errorf("unsupported mode %q", checker.options.Mode)
 	}
@@ -224,4 +243,53 @@ func buildPingArgs(target string, timeout time.Duration) ([]string, error) {
 		}
 		return []string{"-c", "1", "-W", strconv.Itoa(timeoutSeconds), target}, nil
 	}
+}
+
+func (checker *Checker) checkTCP(ctx context.Context) (bool, error) {
+	dialer := &net.Dialer{Timeout: checker.options.Timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", checker.options.Target)
+	if err != nil {
+		return false, nil
+	}
+	conn.Close()
+	return true, nil
+}
+
+// checkUDP probes a UDP port by sending a single byte and waiting for a response.
+// If an ICMP "port unreachable" error is received the port is considered down.
+// A read timeout (no ICMP response) is treated as up, since many UDP services
+// do not reply to unknown payloads. UDP port detection is best-effort and may
+// produce false positives when ICMP is filtered or the service is silent.
+func (checker *Checker) checkUDP(ctx context.Context) (bool, error) {
+	dialer := &net.Dialer{Timeout: checker.options.Timeout}
+	conn, err := dialer.DialContext(ctx, "udp", checker.options.Target)
+	if err != nil {
+		return false, nil
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(checker.options.Timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return false, err
+	}
+
+	if _, err := conn.Write([]byte{0}); err != nil {
+		return false, nil
+	}
+
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err != nil {
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && !opErr.Timeout() {
+			// ICMP port unreachable — port is closed
+			return false, nil
+		}
+		// Read timed out — no ICMP unreachable received; port is likely open
+		return true, nil
+	}
+	return true, nil
 }

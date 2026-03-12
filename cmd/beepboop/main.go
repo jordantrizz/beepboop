@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -75,6 +77,7 @@ type cliConfig struct {
 	showVersion bool
 	target      string
 	mode        string
+	port        int
 	interval    time.Duration
 	timeout     time.Duration
 	retries     int
@@ -149,7 +152,8 @@ func parseFlags() (cliConfig, error) {
 
 	flag.StringVar(&config.target, "target", "", "Target host/IP/URL to check")
 	flag.BoolVar(&config.showVersion, "version", false, "Print version and exit")
-	flag.StringVar(&config.mode, "mode", "auto", "Check mode: auto|icmp|http|https")
+	flag.StringVar(&config.mode, "mode", "auto", "Check mode: auto|icmp|http|https|tcp|udp")
+	flag.IntVar(&config.port, "port", 0, "Port number for tcp/udp checks (can also be embedded in --target as host:port)")
 	flag.DurationVar(&config.interval, "interval", 5*time.Second, "Polling interval")
 	flag.DurationVar(&config.timeout, "timeout", 3*time.Second, "Per-check timeout")
 	flag.IntVar(&config.retries, "retries", 0, "Additional retry attempts per interval")
@@ -178,10 +182,18 @@ func parseFlags() (cliConfig, error) {
 
 	mode := strings.ToLower(strings.TrimSpace(config.mode))
 	switch mode {
-	case "auto", "icmp", "http", "https":
+	case "auto", "icmp", "http", "https", "tcp", "udp":
 		config.mode = mode
 	default:
-		return config, errors.New("--mode must be one of auto|icmp|http|https")
+		return config, errors.New("--mode must be one of auto|icmp|http|https|tcp|udp")
+	}
+
+	if config.port != 0 && (config.port < 1 || config.port > 65535) {
+		return config, errors.New("--port must be between 1 and 65535")
+	}
+
+	if (mode == "tcp" || mode == "udp") && config.port > 0 {
+		config.target = net.JoinHostPort(strings.TrimSpace(config.target), strconv.Itoa(config.port))
 	}
 
 	return config, nil
