@@ -78,6 +78,7 @@ type cliConfig struct {
 	target      string
 	mode        string
 	port        int
+	checks      string
 	interval    time.Duration
 	timeout     time.Duration
 	retries     int
@@ -154,6 +155,7 @@ func parseFlags() (cliConfig, error) {
 	flag.BoolVar(&config.showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&config.mode, "mode", "auto", "Check mode: auto|icmp|http|https|tcp|udp")
 	flag.IntVar(&config.port, "port", 0, "Port number for tcp/udp checks (can also be embedded in --target as host:port)")
+	flag.StringVar(&config.checks, "checks", "", "Comma-separated check specs, e.g. icmp,tcp:22,tcp:80 (uses --target as base host; mutually exclusive with --mode/--port)")
 	flag.DurationVar(&config.interval, "interval", 5*time.Second, "Polling interval")
 	flag.DurationVar(&config.timeout, "timeout", 3*time.Second, "Per-check timeout")
 	flag.IntVar(&config.retries, "retries", 0, "Additional retry attempts per interval")
@@ -178,6 +180,13 @@ func parseFlags() (cliConfig, error) {
 	}
 	if config.retries < 0 {
 		return config, errors.New("--retries must be >= 0")
+	}
+
+	if config.checks != "" && config.mode != "auto" {
+		return config, errors.New("--checks and --mode cannot be used together")
+	}
+	if config.checks != "" && config.port != 0 {
+		return config, errors.New("--port cannot be used with --checks; embed the port in the check spec (e.g. tcp:22)")
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(config.mode))
@@ -221,28 +230,39 @@ func main() {
 		os.Exit(exitUsage)
 	}
 
-	resolvedMode, normalizedTarget, err := check.ResolveModeAndTarget(config.mode, config.target)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "target error: %v\n", err)
-		os.Exit(exitUsage)
+	var checkable check.Checkable
+	if config.checks != "" {
+		checkOpts, err := check.ParseChecks(config.checks, config.target, config.timeout, expectedStatuses)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid --checks: %v\n", err)
+			os.Exit(exitUsage)
+		}
+		checkable = check.NewMultiChecker(checkOpts)
+		if !config.quiet {
+			fmt.Printf("beepboop %s: checks=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, config.checks, config.target, config.interval, config.timeout, config.retries, config.once)
+		}
+	} else {
+		resolvedMode, normalizedTarget, err := check.ResolveModeAndTarget(config.mode, config.target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "target error: %v\n", err)
+			os.Exit(exitUsage)
+		}
+		if !config.quiet {
+			fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once)
+		}
+		checkable = check.NewChecker(check.Options{
+			Mode:             resolvedMode,
+			Target:           normalizedTarget,
+			Timeout:          config.timeout,
+			ExpectedStatuses: expectedStatuses,
+		})
 	}
-
-	if !config.quiet {
-		fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once)
-	}
-
-	checker := check.NewChecker(check.Options{
-		Mode:             resolvedMode,
-		Target:           normalizedTarget,
-		Timeout:          config.timeout,
-		ExpectedStatuses: expectedStatuses,
-	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	if config.once {
-		up, checkErr := checker.CheckWithRetries(ctx, config.retries)
+		up, checkErr := checkable.CheckWithRetries(ctx, config.retries)
 		if checkErr != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputColors.err("check failed"), checkErr)
 			os.Exit(exitFailure)
@@ -264,7 +284,7 @@ func main() {
 	defer ticker.Stop()
 
 	for {
-		up, checkErr := checker.CheckWithRetries(ctx, config.retries)
+		up, checkErr := checkable.CheckWithRetries(ctx, config.retries)
 		if checkErr == nil && up {
 			beep.Emit()
 			if !config.quiet {

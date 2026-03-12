@@ -255,6 +255,160 @@ func (checker *Checker) checkTCP(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// Checkable is implemented by both Checker and MultiChecker.
+type Checkable interface {
+	CheckWithRetries(ctx context.Context, retries int) (bool, error)
+}
+
+// extractHost returns the plain host (and optional port) from a target string by
+// stripping any URL scheme. Returns baseTarget unchanged when no scheme is present.
+func extractHost(baseTarget string) (string, error) {
+	baseTarget = strings.TrimSpace(baseTarget)
+	if baseTarget == "" {
+		return "", errors.New("base target is empty")
+	}
+	if strings.Contains(baseTarget, "://") {
+		u, err := url.Parse(baseTarget)
+		if err != nil {
+			return "", fmt.Errorf("invalid target URL: %v", err)
+		}
+		if u.Host == "" {
+			return "", errors.New("URL target has no host")
+		}
+		return u.Host, nil
+	}
+	return baseTarget, nil
+}
+
+// ParseCheckSpec parses a single check specification into Options using baseTarget as
+// the base host. Supported formats:
+//   - "icmp"     — ICMP ping to the base host
+//   - "tcp:PORT" — TCP connection to base host:PORT
+//   - "udp:PORT" — UDP probe to base host:PORT
+//   - "http"     — HTTP GET to http://base host
+//   - "https"    — HTTPS GET to https://base host
+func ParseCheckSpec(spec string, baseTarget string, timeout time.Duration) (Options, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return Options{}, errors.New("check spec is empty")
+	}
+
+	parts := strings.SplitN(spec, ":", 2)
+	modeStr := strings.ToLower(strings.TrimSpace(parts[0]))
+
+	host, err := extractHost(baseTarget)
+	if err != nil {
+		return Options{}, err
+	}
+
+	switch modeStr {
+	case "icmp":
+		if len(parts) > 1 {
+			return Options{}, fmt.Errorf("icmp check spec does not accept a suffix, got %q", spec)
+		}
+		icmpHost := host
+		if hostname, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			icmpHost = hostname
+		}
+		return Options{Mode: ModeICMP, Target: icmpHost, Timeout: timeout}, nil
+
+	case "tcp", "udp":
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			return Options{}, fmt.Errorf("%s check spec requires a port, e.g. %s:80", modeStr, modeStr)
+		}
+		portStr := strings.TrimSpace(parts[1])
+		portNum, convErr := strconv.Atoi(portStr)
+		if convErr != nil || portNum < 1 || portNum > 65535 {
+			return Options{}, fmt.Errorf("%q is not a valid port number in check spec", portStr)
+		}
+		tcpHost := host
+		if hostname, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			tcpHost = hostname
+		}
+		target := net.JoinHostPort(tcpHost, portStr)
+		if modeStr == "tcp" {
+			return Options{Mode: ModeTCP, Target: target, Timeout: timeout}, nil
+		}
+		return Options{Mode: ModeUDP, Target: target, Timeout: timeout}, nil
+
+	case "http":
+		if len(parts) > 1 {
+			return Options{}, fmt.Errorf("http check spec does not accept a suffix, got %q", spec)
+		}
+		return Options{Mode: ModeHTTP, Target: "http://" + host, Timeout: timeout}, nil
+
+	case "https":
+		if len(parts) > 1 {
+			return Options{}, fmt.Errorf("https check spec does not accept a suffix, got %q", spec)
+		}
+		return Options{Mode: ModeHTTPS, Target: "https://" + host, Timeout: timeout}, nil
+
+	default:
+		return Options{}, fmt.Errorf("unknown check mode %q; supported: icmp, tcp:PORT, udp:PORT, http, https", modeStr)
+	}
+}
+
+// ParseChecks parses a comma-separated list of check specs into a slice of Options.
+// The expectedStatuses map is applied to any http or https check options.
+func ParseChecks(checksStr string, baseTarget string, timeout time.Duration, expectedStatuses map[int]struct{}) ([]Options, error) {
+	checksStr = strings.TrimSpace(checksStr)
+	if checksStr == "" {
+		return nil, errors.New("checks value is empty")
+	}
+
+	parts := strings.Split(checksStr, ",")
+	opts := make([]Options, 0, len(parts))
+	for _, part := range parts {
+		spec := strings.TrimSpace(part)
+		if spec == "" {
+			continue
+		}
+		opt, err := ParseCheckSpec(spec, baseTarget, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid check spec %q: %v", spec, err)
+		}
+		if (opt.Mode == ModeHTTP || opt.Mode == ModeHTTPS) && len(expectedStatuses) > 0 {
+			opt.ExpectedStatuses = expectedStatuses
+		}
+		opts = append(opts, opt)
+	}
+	if len(opts) == 0 {
+		return nil, errors.New("no valid check specs found")
+	}
+	return opts, nil
+}
+
+// MultiChecker runs multiple Checkers and considers the target up only when every
+// individual check passes.
+type MultiChecker struct {
+	checkers []*Checker
+}
+
+// NewMultiChecker creates a MultiChecker from a slice of Options.
+func NewMultiChecker(opts []Options) *MultiChecker {
+	checkers := make([]*Checker, len(opts))
+	for i, opt := range opts {
+		checkers[i] = NewChecker(opt)
+	}
+	return &MultiChecker{checkers: checkers}
+}
+
+// CheckWithRetries runs all contained checkers with the given retries.
+// Returns (true, nil) only when every checker reports up.
+// Returns (false, err) if any checker returns an error; (false, nil) if any reports down.
+func (m *MultiChecker) CheckWithRetries(ctx context.Context, retries int) (bool, error) {
+	for _, checker := range m.checkers {
+		up, err := checker.CheckWithRetries(ctx, retries)
+		if err != nil {
+			return false, err
+		}
+		if !up {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // checkUDP probes a UDP port by sending a single byte and waiting for a response.
 // If an ICMP "port unreachable" error is received the port is considered down.
 // A read timeout (no ICMP response) is treated as up, since many UDP services
