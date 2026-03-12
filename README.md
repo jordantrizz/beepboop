@@ -19,7 +19,9 @@ If you like any of the scripts or tools, please consider donating to help suppor
 ## Features
 - Checks host/IP reachability with `icmp`
 - Checks websites with `http`/`https`
+- Checks TCP/UDP port connectivity with `tcp`/`udp`
 - Auto-detects host vs URL when `--mode auto` (default)
+- **Multiple checks** — require ICMP + TCP ports + HTTP/HTTPS all to pass before signalling up (see `--checks`)
 - Follows HTTP redirects by default (bounded)
 - Runs until success by default (use `--once` for a single check)
 - Colorized terminal status output (with plain-text fallback)
@@ -102,6 +104,18 @@ beepboop --target my-host.local --mode auto --interval 5s --timeout 3s
 beepboop --target https://example.com --mode auto --status 200,204 --once
 ```
 
+### Multiple checks — wait until ICMP + TCP ports are all up
+
+```bash
+beepboop --target myserver.local --checks icmp,tcp:22,tcp:80
+```
+
+### Multiple checks once — verify host is reachable on multiple ports
+
+```bash
+beepboop --target 192.168.1.1 --checks icmp,tcp:22,tcp:443 --once
+```
+
 ### Output examples
 
 Status meanings:
@@ -118,14 +132,27 @@ beepboop --target https://example.com --once --no-color
 
 ## CLI Flags
 - `--target` target host, IP, or URL (required)
-- `--mode` `auto|icmp|http|https` (default: `auto`)
+- `--mode` `auto|icmp|http|https|tcp|udp` (default: `auto`; cannot be used with `--checks`)
+- `--checks` comma-separated check specs, e.g. `icmp,tcp:22,tcp:80` — all must pass for target to be considered up (uses `--target` as base host; cannot be used with `--mode` or `--port`)
 - `--interval` polling interval (default: `5s`)
 - `--timeout` per-check timeout (default: `3s`)
 - `--retries` extra retry attempts per poll cycle (default: `0`)
 - `--once` perform one check and exit
-- `--status` expected HTTP status codes, comma-separated (for HTTP/HTTPS mode)
+- `--status` expected HTTP status codes, comma-separated (for HTTP/HTTPS checks)
 - `--quiet` suppress non-essential output
 - `--no-color` force plain output (disable ANSI colors)
+
+### `--checks` spec format
+
+Each spec in the comma-separated `--checks` list takes one of these forms:
+
+| Spec | Description |
+|------|-------------|
+| `icmp` | ICMP ping to the base host |
+| `tcp:PORT` | TCP connection to base host on PORT |
+| `udp:PORT` | UDP probe to base host on PORT |
+| `http` | HTTP GET to `http://base host` |
+| `https` | HTTPS GET to `https://base host` |
 
 ## Development
 
