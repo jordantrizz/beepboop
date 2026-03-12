@@ -21,6 +21,18 @@ func TestResolveModeAndTargetAuto(t *testing.T) {
 			expectedTarget: "example.com",
 		},
 		{
+			name:           "auto host:port uses tcp",
+			target:         "example.com:22",
+			expectedMode:   ModeTCP,
+			expectedTarget: "example.com:22",
+		},
+		{
+			name:           "auto ip:port uses tcp",
+			target:         "192.0.2.1:80",
+			expectedMode:   ModeTCP,
+			expectedTarget: "192.0.2.1:80",
+		},
+		{
 			name:           "auto http url uses http",
 			target:         "http://example.com",
 			expectedMode:   ModeHTTP,

@@ -117,6 +117,10 @@ func ResolveModeAndTarget(modeText string, target string) (Mode, string, error) 
 			}
 			return ModeHTTPS, trimmedTarget, nil
 		}
+		// If the target looks like host:port, use TCP mode automatically.
+		if host, port, splitErr := net.SplitHostPort(trimmedTarget); splitErr == nil && host != "" && port != "" {
+			return ModeTCP, trimmedTarget, nil
+		}
 		return ModeICMP, trimmedTarget, nil
 	case "tcp", "udp":
 		host, port, err := net.SplitHostPort(trimmedTarget)
