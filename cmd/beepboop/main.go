@@ -83,6 +83,7 @@ type cliConfig struct {
 	timeout     time.Duration
 	retries     int
 	once        bool
+	reverse     bool
 	status      string
 	quiet       bool
 	noColor     bool
@@ -148,22 +149,27 @@ func (value colorizer) wrap(text string, color string) string {
 	return color + text + ansiReset
 }
 
-func parseFlags() (cliConfig, error) {
+func parseFlags(args []string) (cliConfig, error) {
 	config := cliConfig{}
 
-	flag.StringVar(&config.target, "target", "", "Target host/IP/URL to check")
-	flag.BoolVar(&config.showVersion, "version", false, "Print version and exit")
-	flag.StringVar(&config.mode, "mode", "auto", "Check mode: auto|icmp|http|https|tcp|udp")
-	flag.IntVar(&config.port, "port", 0, "Port number for tcp/udp checks (can also be embedded in --target as host:port)")
-	flag.StringVar(&config.checks, "checks", "", "Comma-separated check specs, e.g. icmp,tcp:22,tcp:80 (uses --target as base host; mutually exclusive with --mode/--port)")
-	flag.DurationVar(&config.interval, "interval", 5*time.Second, "Polling interval")
-	flag.DurationVar(&config.timeout, "timeout", 3*time.Second, "Per-check timeout")
-	flag.IntVar(&config.retries, "retries", 0, "Additional retry attempts per interval")
-	flag.BoolVar(&config.once, "once", false, "Run one check and exit")
-	flag.StringVar(&config.status, "status", "", "Expected HTTP status codes, comma-separated (e.g. 200,204)")
-	flag.BoolVar(&config.quiet, "quiet", false, "Suppress non-essential output")
-	flag.BoolVar(&config.noColor, "no-color", false, "Disable colored output")
-	flag.Parse()
+	flagSet := flag.NewFlagSet("beepboop", flag.ContinueOnError)
+	flagSet.SetOutput(os.Stderr)
+	flagSet.StringVar(&config.target, "target", "", "Target host/IP/URL to check")
+	flagSet.BoolVar(&config.showVersion, "version", false, "Print version and exit")
+	flagSet.StringVar(&config.mode, "mode", "auto", "Check mode: auto|icmp|http|https|tcp|udp")
+	flagSet.IntVar(&config.port, "port", 0, "Port number for tcp/udp checks (can also be embedded in --target as host:port)")
+	flagSet.StringVar(&config.checks, "checks", "", "Comma-separated check specs, e.g. icmp,tcp:22,tcp:80 (uses --target as base host; mutually exclusive with --mode/--port)")
+	flagSet.DurationVar(&config.interval, "interval", 5*time.Second, "Polling interval")
+	flagSet.DurationVar(&config.timeout, "timeout", 3*time.Second, "Per-check timeout")
+	flagSet.IntVar(&config.retries, "retries", 0, "Additional retry attempts per interval")
+	flagSet.BoolVar(&config.once, "once", false, "Run one check and exit")
+	flagSet.BoolVar(&config.reverse, "reverse", false, "Alert when the target is down instead of up")
+	flagSet.StringVar(&config.status, "status", "", "Expected HTTP status codes, comma-separated (e.g. 200,204)")
+	flagSet.BoolVar(&config.quiet, "quiet", false, "Suppress non-essential output")
+	flagSet.BoolVar(&config.noColor, "no-color", false, "Disable colored output")
+	if err := flagSet.Parse(args); err != nil {
+		return config, err
+	}
 
 	if config.showVersion {
 		return config, nil
@@ -208,10 +214,35 @@ func parseFlags() (cliConfig, error) {
 	return config, nil
 }
 
+func alertCondition(reverse bool) string {
+	if reverse {
+		return "down"
+	}
+	return "up"
+}
+
+func alertStateText(reverse bool) string {
+	return "target is " + alertCondition(reverse)
+}
+
+func waitingStateText(reverse bool) string {
+	if reverse {
+		return "target is up"
+	}
+	return "target is down"
+}
+
+func shouldAlert(reverse bool, up bool) bool {
+	if reverse {
+		return !up
+	}
+	return up
+}
+
 func main() {
 	appVersion := resolveVersion()
 
-	config, err := parseFlags()
+	config, err := parseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "usage error: %v\n", err)
 		os.Exit(exitUsage)
@@ -239,7 +270,7 @@ func main() {
 		}
 		checkable = check.NewMultiChecker(checkOpts)
 		if !config.quiet {
-			fmt.Printf("beepboop %s: checks=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, config.checks, config.target, config.interval, config.timeout, config.retries, config.once)
+			fmt.Printf("beepboop %s: checks=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s\n", appVersion, config.checks, config.target, config.interval, config.timeout, config.retries, config.once, config.reverse, alertCondition(config.reverse))
 		}
 	} else {
 		resolvedMode, normalizedTarget, err := check.ResolveModeAndTarget(config.mode, config.target)
@@ -248,7 +279,7 @@ func main() {
 			os.Exit(exitUsage)
 		}
 		if !config.quiet {
-			fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once)
+			fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once, config.reverse, alertCondition(config.reverse))
 		}
 		checkable = check.NewChecker(check.Options{
 			Mode:             resolvedMode,
@@ -267,15 +298,23 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputColors.err("check failed"), checkErr)
 			os.Exit(exitFailure)
 		}
-		if up {
+		if shouldAlert(config.reverse, up) {
 			beep.Emit()
 			if !config.quiet {
-				fmt.Println(outputColors.up("target is up"))
+				if config.reverse {
+					fmt.Println(outputColors.down(alertStateText(config.reverse)))
+				} else {
+					fmt.Println(outputColors.up(alertStateText(config.reverse)))
+				}
 			}
 			os.Exit(exitSuccess)
 		}
 		if !config.quiet {
-			fmt.Println(outputColors.down("target is down"))
+			if config.reverse {
+				fmt.Println(outputColors.up(waitingStateText(config.reverse)))
+			} else {
+				fmt.Println(outputColors.down(waitingStateText(config.reverse)))
+			}
 		}
 		os.Exit(exitFailure)
 	}
@@ -285,10 +324,14 @@ func main() {
 
 	for {
 		up, checkErr := checkable.CheckWithRetries(ctx, config.retries)
-		if checkErr == nil && up {
+		if checkErr == nil && shouldAlert(config.reverse, up) {
 			beep.Emit()
 			if !config.quiet {
-				fmt.Println(outputColors.up("target is up"))
+				if config.reverse {
+					fmt.Println(outputColors.down(alertStateText(config.reverse)))
+				} else {
+					fmt.Println(outputColors.up(alertStateText(config.reverse)))
+				}
 			}
 			os.Exit(exitSuccess)
 		}
@@ -297,7 +340,11 @@ func main() {
 			if checkErr != nil {
 				fmt.Printf("%s: %v\n", outputColors.waiting("still waiting"), checkErr)
 			} else {
-				fmt.Printf("%s: %s\n", outputColors.waiting("still waiting"), outputColors.down("target is down"))
+				if config.reverse {
+					fmt.Printf("%s: %s\n", outputColors.waiting("still waiting"), outputColors.up(waitingStateText(config.reverse)))
+				} else {
+					fmt.Printf("%s: %s\n", outputColors.waiting("still waiting"), outputColors.down(waitingStateText(config.reverse)))
+				}
 			}
 		}
 

@@ -24,6 +24,7 @@ If you like any of the scripts or tools, please consider donating to help suppor
 - **Multiple checks** — require ICMP + TCP ports + HTTP/HTTPS all to pass before signalling up (see `--checks`)
 - Follows HTTP redirects by default (bounded)
 - Runs until success by default (use `--once` for a single check)
+- Optional reverse mode alerts when the target goes down
 - Colorized terminal status output (with plain-text fallback)
 - Works across Linux, macOS, and Windows via Go cross-compilation
 
@@ -98,6 +99,12 @@ beepboop --target https://example.com --mode auto --once
 beepboop --target my-host.local --mode auto --interval 5s --timeout 3s
 ```
 
+### Keep polling until a host goes down
+
+```bash
+beepboop --target my-host.local --mode auto --reverse --interval 5s --timeout 3s
+```
+
 ### HTTP status-code validation example
 
 ```bash
@@ -138,6 +145,7 @@ beepboop --target https://example.com --once --no-color
 - `--timeout` per-check timeout (default: `3s`)
 - `--retries` extra retry attempts per poll cycle (default: `0`)
 - `--once` perform one check and exit
+- `--reverse` alert when the target is down instead of up
 - `--status` expected HTTP status codes, comma-separated (for HTTP/HTTPS checks)
 - `--quiet` suppress non-essential output
 - `--no-color` force plain output (disable ANSI colors)
