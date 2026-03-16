@@ -36,6 +36,28 @@ type Checker struct {
 	httpClient *http.Client
 }
 
+type AttemptResult struct {
+	Mode       Mode
+	Target     string
+	Retry      int
+	MaxRetries int
+	Up         bool
+	Error      string
+	Timestamp  time.Time
+	Duration   time.Duration
+	HTTPStatus int
+}
+
+type CheckOutcome struct {
+	Up       bool
+	Error    string
+	Attempts []AttemptResult
+}
+
+type DetailedCheckable interface {
+	CheckWithRetriesDetailed(ctx context.Context, retries int) CheckOutcome
+}
+
 func NewChecker(options Options) *Checker {
 	client := &http.Client{
 		Timeout: options.Timeout,
@@ -110,17 +132,40 @@ func ResolveModeAndTarget(modeText string, target string) (Mode, string, error) 
 		if strings.HasPrefix(trimmedTarget, "https://") {
 			return ModeHTTPS, trimmedTarget, nil
 		}
-		parsed, err := url.Parse(trimmedTarget)
-		if err == nil && parsed.Scheme != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
-			if parsed.Scheme == "http" {
-				return ModeHTTP, trimmedTarget, nil
+		if strings.Contains(trimmedTarget, "://") {
+			parsed, err := url.Parse(trimmedTarget)
+			if err == nil && parsed.Scheme != "" {
+				scheme := strings.ToLower(parsed.Scheme)
+				if scheme == "http" {
+					return ModeHTTP, trimmedTarget, nil
+				}
+				if scheme == "https" {
+					return ModeHTTPS, trimmedTarget, nil
+				}
+				return "", "", fmt.Errorf("unsupported URL scheme %q in --mode=auto target", parsed.Scheme)
 			}
-			return ModeHTTPS, trimmedTarget, nil
 		}
-		// If the target looks like host:port, use TCP mode automatically.
+
+		if strings.ContainsAny(trimmedTarget, "/?#") {
+			normalized, scheme, normalizeErr := normalizeBareWebTarget(trimmedTarget)
+			if normalizeErr != nil {
+				return "", "", normalizeErr
+			}
+			if scheme == "https" {
+				return ModeHTTPS, normalized, nil
+			}
+			return ModeHTTP, normalized, nil
+		}
+
 		if host, port, splitErr := net.SplitHostPort(trimmedTarget); splitErr == nil && host != "" && port != "" {
-			return ModeTCP, trimmedTarget, nil
+			scheme := inferWebSchemeFromPort(port)
+			normalized := scheme + "://" + trimmedTarget
+			if scheme == "https" {
+				return ModeHTTPS, normalized, nil
+			}
+			return ModeHTTP, normalized, nil
 		}
+
 		return ModeICMP, trimmedTarget, nil
 	case "tcp", "udp":
 		host, port, err := net.SplitHostPort(trimmedTarget)
@@ -136,65 +181,152 @@ func ResolveModeAndTarget(modeText string, target string) (Mode, string, error) 
 	}
 }
 
+func normalizeBareWebTarget(target string) (string, string, error) {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return "", "", errors.New("target is empty")
+	}
+
+	targetForParse := trimmed
+	if strings.HasPrefix(trimmed, "//") {
+		targetForParse = "http:" + trimmed
+	} else {
+		targetForParse = "http://" + trimmed
+	}
+
+	parsed, err := url.Parse(targetForParse)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid URL-like target: %v", err)
+	}
+
+	if parsed.Host == "" {
+		return "", "", errors.New("URL-like target has no host")
+	}
+
+	scheme := "http"
+	if parsed.Port() != "" {
+		scheme = inferWebSchemeFromPort(parsed.Port())
+	}
+	parsed.Scheme = scheme
+
+	return parsed.String(), scheme, nil
+}
+
+func inferWebSchemeFromPort(port string) string {
+	switch port {
+	case "443", "8443":
+		return "https"
+	default:
+		return "http"
+	}
+}
+
 func (checker *Checker) CheckWithRetries(ctx context.Context, retries int) (bool, error) {
+	outcome := checker.CheckWithRetriesDetailed(ctx, retries)
+	if outcome.Up {
+		return true, nil
+	}
+	if outcome.Error != "" {
+		return false, errors.New(outcome.Error)
+	}
+	return false, nil
+}
+
+func (checker *Checker) CheckWithRetriesDetailed(ctx context.Context, retries int) CheckOutcome {
 	attempts := retries + 1
-	var lastErr error
+	outcome := CheckOutcome{
+		Up:       false,
+		Attempts: make([]AttemptResult, 0, attempts),
+	}
 
 	for attempt := 0; attempt < attempts; attempt++ {
-		isUp, err := checker.CheckOnce(ctx)
-		if err == nil && isUp {
-			return true, nil
+		started := time.Now()
+		isUp, meta, err := checker.checkOnceDetailed(ctx)
+		attemptResult := AttemptResult{
+			Mode:       checker.options.Mode,
+			Target:     checker.options.Target,
+			Retry:      attempt + 1,
+			MaxRetries: attempts,
+			Up:         isUp,
+			Timestamp:  time.Now().UTC(),
+			Duration:   time.Since(started),
+			HTTPStatus: meta.statusCode,
 		}
 		if err != nil {
-			lastErr = err
+			attemptResult.Error = err.Error()
+			outcome.Error = err.Error()
 		}
+		outcome.Attempts = append(outcome.Attempts, attemptResult)
+
+		if err == nil && isUp {
+			outcome.Up = true
+			outcome.Error = ""
+			return outcome
+		}
+
 		if attempt < attempts-1 {
 			select {
 			case <-ctx.Done():
-				return false, ctx.Err()
+				outcome.Error = ctx.Err().Error()
+				return outcome
 			case <-time.After(150 * time.Millisecond):
 			}
 		}
 	}
 
-	if lastErr != nil {
-		return false, lastErr
+	return outcome
+}
+
+type checkMetadata struct {
+	statusCode int
+}
+
+func (checker *Checker) checkOnceDetailed(ctx context.Context) (bool, checkMetadata, error) {
+	switch checker.options.Mode {
+	case ModeICMP:
+		up, err := checker.checkICMP(ctx)
+		return up, checkMetadata{}, err
+	case ModeHTTP, ModeHTTPS:
+		up, statusCode, err := checker.checkHTTPDetailed(ctx)
+		return up, checkMetadata{statusCode: statusCode}, err
+	case ModeTCP:
+		up, err := checker.checkTCP(ctx)
+		return up, checkMetadata{}, err
+	case ModeUDP:
+		up, err := checker.checkUDP(ctx)
+		return up, checkMetadata{}, err
+	default:
+		return false, checkMetadata{}, fmt.Errorf("unsupported mode %q", checker.options.Mode)
 	}
-	return false, nil
 }
 
 func (checker *Checker) CheckOnce(ctx context.Context) (bool, error) {
-	switch checker.options.Mode {
-	case ModeICMP:
-		return checker.checkICMP(ctx)
-	case ModeHTTP, ModeHTTPS:
-		return checker.checkHTTP(ctx)
-	case ModeTCP:
-		return checker.checkTCP(ctx)
-	case ModeUDP:
-		return checker.checkUDP(ctx)
-	default:
-		return false, fmt.Errorf("unsupported mode %q", checker.options.Mode)
-	}
+	up, _, err := checker.checkOnceDetailed(ctx)
+	return up, err
 }
 
 func (checker *Checker) checkHTTP(ctx context.Context) (bool, error) {
+	up, _, err := checker.checkHTTPDetailed(ctx)
+	return up, err
+}
+
+func (checker *Checker) checkHTTPDetailed(ctx context.Context) (bool, int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, checker.options.Target, nil)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 
 	response, err := checker.httpClient.Do(request)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer response.Body.Close()
 
 	if len(checker.options.ExpectedStatuses) == 0 {
-		return response.StatusCode >= 200 && response.StatusCode <= 399, nil
+		return response.StatusCode == http.StatusOK, response.StatusCode, nil
 	}
 	_, ok := checker.options.ExpectedStatuses[response.StatusCode]
-	return ok, nil
+	return ok, response.StatusCode, nil
 }
 
 func (checker *Checker) checkICMP(ctx context.Context) (bool, error) {
@@ -397,16 +529,33 @@ func NewMultiChecker(opts []Options) *MultiChecker {
 // Returns (true, nil) only when every checker reports up.
 // Returns (false, err) if any checker returns an error; (false, nil) if any reports down.
 func (m *MultiChecker) CheckWithRetries(ctx context.Context, retries int) (bool, error) {
+	outcome := m.CheckWithRetriesDetailed(ctx, retries)
+	if outcome.Up {
+		return true, nil
+	}
+	if outcome.Error != "" {
+		return false, errors.New(outcome.Error)
+	}
+	return false, nil
+}
+
+func (m *MultiChecker) CheckWithRetriesDetailed(ctx context.Context, retries int) CheckOutcome {
+	outcome := CheckOutcome{Attempts: []AttemptResult{}}
 	for _, checker := range m.checkers {
-		up, err := checker.CheckWithRetries(ctx, retries)
-		if err != nil {
-			return false, err
+		checkerOutcome := checker.CheckWithRetriesDetailed(ctx, retries)
+		outcome.Attempts = append(outcome.Attempts, checkerOutcome.Attempts...)
+		if checkerOutcome.Error != "" {
+			outcome.Up = false
+			outcome.Error = checkerOutcome.Error
+			return outcome
 		}
-		if !up {
-			return false, nil
+		if !checkerOutcome.Up {
+			outcome.Up = false
+			return outcome
 		}
 	}
-	return true, nil
+	outcome.Up = true
+	return outcome
 }
 
 // checkUDP probes a UDP port by sending a single byte and waiting for a response.

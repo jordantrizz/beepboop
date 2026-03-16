@@ -99,3 +99,41 @@ func TestHTTPCheckerExpectedStatusAfterRedirect(t *testing.T) {
 		t.Fatal("expected accepted status to be treated as up")
 	}
 }
+
+func TestHTTPCheckerMovedPermanentlyRequiresExplicitStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer server.Close()
+
+	defaultChecker := NewChecker(Options{
+		Mode:    ModeHTTP,
+		Target:  server.URL,
+		Timeout: 2 * time.Second,
+	})
+
+	up, err := defaultChecker.CheckOnce(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error for default checker: %v", err)
+	}
+	if up {
+		t.Fatal("expected 301 to be treated as down by default")
+	}
+
+	explicitChecker := NewChecker(Options{
+		Mode:    ModeHTTP,
+		Target:  server.URL,
+		Timeout: 2 * time.Second,
+		ExpectedStatuses: map[int]struct{}{
+			http.StatusMovedPermanently: {},
+		},
+	})
+
+	up, err = explicitChecker.CheckOnce(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error for explicit checker: %v", err)
+	}
+	if !up {
+		t.Fatal("expected 301 to be treated as up when explicitly requested")
+	}
+}

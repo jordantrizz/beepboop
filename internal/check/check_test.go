@@ -21,16 +21,46 @@ func TestResolveModeAndTargetAuto(t *testing.T) {
 			expectedTarget: "example.com",
 		},
 		{
-			name:           "auto host:port uses tcp",
+			name:           "auto host:port defaults to http",
 			target:         "example.com:22",
-			expectedMode:   ModeTCP,
-			expectedTarget: "example.com:22",
+			expectedMode:   ModeHTTP,
+			expectedTarget: "http://example.com:22",
 		},
 		{
-			name:           "auto ip:port uses tcp",
+			name:           "auto ip:port defaults to http",
 			target:         "192.0.2.1:80",
-			expectedMode:   ModeTCP,
-			expectedTarget: "192.0.2.1:80",
+			expectedMode:   ModeHTTP,
+			expectedTarget: "http://192.0.2.1:80",
+		},
+		{
+			name:           "auto host path defaults to http",
+			target:         "example.com/api/status",
+			expectedMode:   ModeHTTP,
+			expectedTarget: "http://example.com/api/status",
+		},
+		{
+			name:           "auto host query defaults to http",
+			target:         "example.com?health=1",
+			expectedMode:   ModeHTTP,
+			expectedTarget: "http://example.com?health=1",
+		},
+		{
+			name:           "auto host with tls port defaults to https",
+			target:         "example.com:443",
+			expectedMode:   ModeHTTPS,
+			expectedTarget: "https://example.com:443",
+		},
+		{
+			name:           "auto host with alt tls port defaults to https",
+			target:         "example.com:8443",
+			expectedMode:   ModeHTTPS,
+			expectedTarget: "https://example.com:8443",
+		},
+		{
+			name:           "auto host with path and tls port defaults to https",
+			target:         "example.com:8443/health",
+			expectedMode:   ModeHTTPS,
+			expectedTarget: "https://example.com:8443/health",
 		},
 		{
 			name:           "auto http url uses http",
@@ -43,6 +73,18 @@ func TestResolveModeAndTargetAuto(t *testing.T) {
 			target:         "https://example.com",
 			expectedMode:   ModeHTTPS,
 			expectedTarget: "https://example.com",
+		},
+		{
+			name:           "auto https url with custom port uses https and keeps port",
+			target:         "https://example.com:8080",
+			expectedMode:   ModeHTTPS,
+			expectedTarget: "https://example.com:8080",
+		},
+		{
+			name:           "auto ipv6 with port defaults to http",
+			target:         "[2001:db8::1]:8080",
+			expectedMode:   ModeHTTP,
+			expectedTarget: "http://[2001:db8::1]:8080",
 		},
 	}
 
@@ -229,12 +271,12 @@ func TestCheckTCPDown(t *testing.T) {
 func TestParseCheckSpec(t *testing.T) {
 	timeout := 3 * time.Second
 	testCases := []struct {
-		name        string
-		spec        string
-		baseTarget  string
-		wantMode    Mode
-		wantTarget  string
-		wantErr     bool
+		name       string
+		spec       string
+		baseTarget string
+		wantMode   Mode
+		wantTarget string
+		wantErr    bool
 	}{
 		{name: "icmp plain host", spec: "icmp", baseTarget: "example.com", wantMode: ModeICMP, wantTarget: "example.com"},
 		{name: "icmp strips port from base", spec: "icmp", baseTarget: "example.com:22", wantMode: ModeICMP, wantTarget: "example.com"},
@@ -246,6 +288,7 @@ func TestParseCheckSpec(t *testing.T) {
 		{name: "http plain host", spec: "http", baseTarget: "example.com", wantMode: ModeHTTP, wantTarget: "http://example.com"},
 		{name: "http with url base", spec: "http", baseTarget: "https://example.com", wantMode: ModeHTTP, wantTarget: "http://example.com"},
 		{name: "https plain host", spec: "https", baseTarget: "example.com", wantMode: ModeHTTPS, wantTarget: "https://example.com"},
+		{name: "https host with custom port", spec: "https", baseTarget: "example.com:8080", wantMode: ModeHTTPS, wantTarget: "https://example.com:8080"},
 		// error cases
 		{name: "empty spec", spec: "", baseTarget: "example.com", wantErr: true},
 		{name: "empty base target", spec: "icmp", baseTarget: "", wantErr: true},

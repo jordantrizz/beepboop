@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -81,13 +82,21 @@ type cliConfig struct {
 	checks      string
 	interval    time.Duration
 	timeout     time.Duration
+	timeoutSet  bool
 	retries     int
 	once        bool
 	reverse     bool
-	status      string
+	httpStatus  string
+	verbose     bool
+	jsonOutput  bool
 	quiet       bool
 	noColor     bool
 }
+
+const (
+	defaultTimeout     = 3 * time.Second
+	httpDefaultTimeout = 30 * time.Second
+)
 
 type colorizer struct {
 	enabled bool
@@ -160,11 +169,13 @@ func parseFlags(args []string) (cliConfig, error) {
 	flagSet.IntVar(&config.port, "port", 0, "Port number for tcp/udp checks (can also be embedded in --target as host:port)")
 	flagSet.StringVar(&config.checks, "checks", "", "Comma-separated check specs, e.g. icmp,tcp:22,tcp:80 (uses --target as base host; mutually exclusive with --mode/--port)")
 	flagSet.DurationVar(&config.interval, "interval", 5*time.Second, "Polling interval")
-	flagSet.DurationVar(&config.timeout, "timeout", 3*time.Second, "Per-check timeout")
+	flagSet.DurationVar(&config.timeout, "timeout", defaultTimeout, "Per-check timeout")
 	flagSet.IntVar(&config.retries, "retries", 0, "Additional retry attempts per interval")
 	flagSet.BoolVar(&config.once, "once", false, "Run one check and exit")
 	flagSet.BoolVar(&config.reverse, "reverse", false, "Alert when the target is down instead of up")
-	flagSet.StringVar(&config.status, "status", "", "Expected HTTP status codes, comma-separated (e.g. 200,204)")
+	flagSet.StringVar(&config.httpStatus, "http-status", "", "Expected HTTP status codes, comma-separated (e.g. 200,204)")
+	flagSet.BoolVar(&config.verbose, "verbose", false, "Show per-attempt diagnostic details")
+	flagSet.BoolVar(&config.jsonOutput, "json", false, "Output structured JSON lines")
 	flagSet.BoolVar(&config.quiet, "quiet", false, "Suppress non-essential output")
 	flagSet.BoolVar(&config.noColor, "no-color", false, "Disable colored output")
 	if err := flagSet.Parse(args); err != nil {
@@ -187,6 +198,8 @@ func parseFlags(args []string) (cliConfig, error) {
 	if config.retries < 0 {
 		return config, errors.New("--retries must be >= 0")
 	}
+
+	config.timeoutSet = hasDurationFlag(args, "timeout")
 
 	if config.checks != "" && config.mode != "auto" {
 		return config, errors.New("--checks and --mode cannot be used together")
@@ -214,6 +227,43 @@ func parseFlags(args []string) (cliConfig, error) {
 	return config, nil
 }
 
+func hasDurationFlag(args []string, name string) bool {
+	flagName := "--" + name
+	prefix := flagName + "="
+	for _, arg := range args {
+		if arg == flagName || strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func checksIncludeHTTP(checks string) bool {
+	for _, rawPart := range strings.Split(checks, ",") {
+		spec := strings.ToLower(strings.TrimSpace(rawPart))
+		if spec == "http" || spec == "https" {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveTimeout(config cliConfig, resolvedMode check.Mode) time.Duration {
+	if config.timeoutSet {
+		return config.timeout
+	}
+
+	if resolvedMode == check.ModeHTTP || resolvedMode == check.ModeHTTPS {
+		return httpDefaultTimeout
+	}
+
+	if config.checks != "" && checksIncludeHTTP(config.checks) {
+		return httpDefaultTimeout
+	}
+
+	return config.timeout
+}
+
 func alertCondition(reverse bool) string {
 	if reverse {
 		return "down"
@@ -239,6 +289,225 @@ func shouldAlert(reverse bool, up bool) bool {
 	return up
 }
 
+type runtimeOutput struct {
+	colorizer        colorizer
+	isTTY            bool
+	quietHumanOutput bool
+	verbose          bool
+	jsonOutput       bool
+	compactActive    bool
+}
+
+type jsonEvent struct {
+	SchemaVersion string `json:"schema_version"`
+	EventType     string `json:"event_type"`
+	Timestamp     string `json:"timestamp"`
+	RunMode       string `json:"run_mode,omitempty"`
+	AlertOn       string `json:"alert_on,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	Target        string `json:"target,omitempty"`
+	Checks        string `json:"checks,omitempty"`
+	PollAttempt   int    `json:"poll_attempt,omitempty"`
+	RetryAttempt  int    `json:"retry_attempt,omitempty"`
+	RetryTotal    int    `json:"retry_total,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Error         string `json:"error,omitempty"`
+	Up            *bool  `json:"up,omitempty"`
+	Alerted       *bool  `json:"alerted,omitempty"`
+	StartTime     string `json:"start_time,omitempty"`
+	CurrentTime   string `json:"current_time,omitempty"`
+	ElapsedMs     int64  `json:"elapsed_ms,omitempty"`
+	DurationMs    int64  `json:"duration_ms,omitempty"`
+	HTTPStatus    int    `json:"http_status,omitempty"`
+	Interval      string `json:"interval,omitempty"`
+	Timeout       string `json:"timeout,omitempty"`
+	Retries       int    `json:"retries,omitempty"`
+	Once          *bool  `json:"once,omitempty"`
+	Reverse       *bool  `json:"reverse,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+}
+
+func newRuntimeOutput(colors colorizer, quiet bool, verbose bool, jsonOutput bool) runtimeOutput {
+	return runtimeOutput{
+		colorizer:        colors,
+		isTTY:            stdoutIsTTY(),
+		quietHumanOutput: quiet,
+		verbose:          verbose,
+		jsonOutput:       jsonOutput,
+	}
+}
+
+func stdoutIsTTY() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func (value *runtimeOutput) printHeader(line string) {
+	if value.jsonOutput || value.quietHumanOutput {
+		return
+	}
+	fmt.Println(line)
+}
+
+func (value *runtimeOutput) printTerminalStatus(reverse bool, up bool) {
+	if value.jsonOutput || value.quietHumanOutput {
+		return
+	}
+	if reverse {
+		if up {
+			fmt.Println(value.colorizer.up(waitingStateText(reverse)))
+			return
+		}
+		fmt.Println(value.colorizer.down(alertStateText(reverse)))
+		return
+	}
+	if up {
+		fmt.Println(value.colorizer.up(alertStateText(reverse)))
+		return
+	}
+	fmt.Println(value.colorizer.down(waitingStateText(reverse)))
+}
+
+func (value *runtimeOutput) printCheckError(err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s: %v\n", value.colorizer.err("check failed"), err)
+}
+
+func (value *runtimeOutput) printCompactProgress(line string) {
+	if value.jsonOutput || value.quietHumanOutput {
+		return
+	}
+	if value.isTTY {
+		value.compactActive = true
+		fmt.Printf("\r\033[2K%s", line)
+		return
+	}
+	fmt.Println(line)
+}
+
+func (value *runtimeOutput) printVerbose(line string) {
+	if value.jsonOutput || value.quietHumanOutput || !value.verbose {
+		return
+	}
+	if value.compactActive {
+		fmt.Print("\n")
+		value.compactActive = false
+	}
+	fmt.Println(line)
+}
+
+func (value *runtimeOutput) finishProgressLine() {
+	if value.compactActive {
+		fmt.Print("\n")
+		value.compactActive = false
+	}
+}
+
+func (value *runtimeOutput) emitJSON(event jsonEvent) {
+	if !value.jsonOutput {
+		return
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "json marshal error: %v\n", err)
+		return
+	}
+	fmt.Println(string(encoded))
+}
+
+func boolPtr(input bool) *bool {
+	value := input
+	return &value
+}
+
+func intPtr(input int) *int {
+	value := input
+	return &value
+}
+
+func compactStatusLine(colors colorizer, start time.Time, now time.Time, pollAttempt int, attempt check.AttemptResult, waitingText string, errText string) string {
+	status := "down"
+	if attempt.Up {
+		status = "up"
+	}
+	if errText != "" {
+		status = "error"
+	}
+
+	prefix := colors.waiting("still waiting")
+	core := fmt.Sprintf(
+		"start=%s now=%s elapsed=%s poll=%d retry=%d/%d status=%s",
+		start.Format(time.RFC3339),
+		now.Format(time.RFC3339),
+		now.Sub(start).Round(time.Millisecond),
+		pollAttempt,
+		attempt.Retry,
+		attempt.MaxRetries,
+		status,
+	)
+
+	if errText != "" {
+		return fmt.Sprintf("%s %s err=%q", prefix, core, errText)
+	}
+	return fmt.Sprintf("%s %s state=%q", prefix, core, waitingText)
+}
+
+func verboseAttemptLine(pollAttempt int, attempt check.AttemptResult, errText string) string {
+	status := "down"
+	if attempt.Up {
+		status = "up"
+	}
+	if errText != "" {
+		status = "error"
+	}
+
+	if errText != "" {
+		return fmt.Sprintf(
+			"verbose: poll=%d retry=%d/%d mode=%s target=%s status=%s err=%q duration=%s",
+			pollAttempt,
+			attempt.Retry,
+			attempt.MaxRetries,
+			attempt.Mode,
+			attempt.Target,
+			status,
+			errText,
+			attempt.Duration.Round(time.Millisecond),
+		)
+	}
+
+	extra := ""
+	if attempt.HTTPStatus > 0 {
+		extra = fmt.Sprintf(" http_status=%d", attempt.HTTPStatus)
+	}
+
+	return fmt.Sprintf(
+		"verbose: poll=%d retry=%d/%d mode=%s target=%s status=%s duration=%s%s",
+		pollAttempt,
+		attempt.Retry,
+		attempt.MaxRetries,
+		attempt.Mode,
+		attempt.Target,
+		status,
+		attempt.Duration.Round(time.Millisecond),
+		extra,
+	)
+}
+
+func attemptStatusText(attempt check.AttemptResult) string {
+	if attempt.Error != "" {
+		return "error"
+	}
+	if attempt.Up {
+		return "up"
+	}
+	return "down"
+}
+
 func main() {
 	appVersion := resolveVersion()
 
@@ -254,37 +523,45 @@ func main() {
 	}
 
 	outputColors := newColorizer(config.noColor)
+	runtimeOutput := newRuntimeOutput(outputColors, config.quiet, config.verbose, config.jsonOutput)
 
-	expectedStatuses, err := check.ParseExpectedStatuses(config.status)
+	resolvedMode := check.Mode("")
+	normalizedTarget := ""
+	if config.checks == "" {
+		resolvedMode, normalizedTarget, err = check.ResolveModeAndTarget(config.mode, config.target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "target error: %v\n", err)
+			os.Exit(exitUsage)
+		}
+	}
+
+	resolvedTimeout := effectiveTimeout(config, resolvedMode)
+
+	expectedStatuses, err := check.ParseExpectedStatuses(config.httpStatus)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid --status: %v\n", err)
+		fmt.Fprintf(os.Stderr, "invalid --http-status: %v\n", err)
 		os.Exit(exitUsage)
 	}
 
 	var checkable check.Checkable
+	resolvedTargetForOutput := normalizedTarget
+	resolvedModeForOutput := string(resolvedMode)
 	if config.checks != "" {
-		checkOpts, err := check.ParseChecks(config.checks, config.target, config.timeout, expectedStatuses)
+		checkOpts, err := check.ParseChecks(config.checks, config.target, resolvedTimeout, expectedStatuses)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid --checks: %v\n", err)
 			os.Exit(exitUsage)
 		}
 		checkable = check.NewMultiChecker(checkOpts)
-		if !config.quiet {
-			fmt.Printf("beepboop %s: checks=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s\n", appVersion, config.checks, config.target, config.interval, config.timeout, config.retries, config.once, config.reverse, alertCondition(config.reverse))
-		}
+		resolvedModeForOutput = "checks"
+		resolvedTargetForOutput = config.target
+		runtimeOutput.printHeader(fmt.Sprintf("beepboop %s: checks=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s", appVersion, config.checks, config.target, config.interval, resolvedTimeout, config.retries, config.once, config.reverse, alertCondition(config.reverse)))
 	} else {
-		resolvedMode, normalizedTarget, err := check.ResolveModeAndTarget(config.mode, config.target)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "target error: %v\n", err)
-			os.Exit(exitUsage)
-		}
-		if !config.quiet {
-			fmt.Printf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s\n", appVersion, resolvedMode, normalizedTarget, config.interval, config.timeout, config.retries, config.once, config.reverse, alertCondition(config.reverse))
-		}
+		runtimeOutput.printHeader(fmt.Sprintf("beepboop %s: mode=%s target=%s interval=%s timeout=%s retries=%d once=%t reverse=%t alert=%s", appVersion, resolvedMode, normalizedTarget, config.interval, resolvedTimeout, config.retries, config.once, config.reverse, alertCondition(config.reverse)))
 		checkable = check.NewChecker(check.Options{
 			Mode:             resolvedMode,
 			Target:           normalizedTarget,
-			Timeout:          config.timeout,
+			Timeout:          resolvedTimeout,
 			ExpectedStatuses: expectedStatuses,
 		})
 	}
@@ -292,64 +569,195 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	detailedCheckable, ok := checkable.(check.DetailedCheckable)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "runtime error: selected checker does not support detailed output")
+		os.Exit(exitFailure)
+	}
+
+	runStart := time.Now().UTC()
+	runtimeOutput.emitJSON(jsonEvent{
+		SchemaVersion: "1.0",
+		EventType:     "run_start",
+		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+		RunMode: func() string {
+			if config.once {
+				return "once"
+			}
+			return "until_success"
+		}(),
+		AlertOn:   alertCondition(config.reverse),
+		Mode:      resolvedModeForOutput,
+		Target:    resolvedTargetForOutput,
+		Checks:    config.checks,
+		Interval:  config.interval.String(),
+		Timeout:   resolvedTimeout.String(),
+		Retries:   config.retries,
+		Once:      boolPtr(config.once),
+		Reverse:   boolPtr(config.reverse),
+		StartTime: runStart.Format(time.RFC3339Nano),
+	})
+
 	if config.once {
-		up, checkErr := checkable.CheckWithRetries(ctx, config.retries)
-		if checkErr != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", outputColors.err("check failed"), checkErr)
+		pollAttempt := 1
+		outcome := detailedCheckable.CheckWithRetriesDetailed(ctx, config.retries)
+		for _, attempt := range outcome.Attempts {
+			errText := attempt.Error
+			if errText == "" && outcome.Error != "" {
+				errText = outcome.Error
+			}
+			runtimeOutput.printVerbose(verboseAttemptLine(pollAttempt, attempt, errText))
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "attempt",
+				Timestamp:     attempt.Timestamp.Format(time.RFC3339Nano),
+				Mode:          string(attempt.Mode),
+				Target:        attempt.Target,
+				PollAttempt:   pollAttempt,
+				RetryAttempt:  attempt.Retry,
+				RetryTotal:    attempt.MaxRetries,
+				Status:        attemptStatusText(attempt),
+				Error:         errText,
+				Up:            boolPtr(attempt.Up),
+				DurationMs:    attempt.Duration.Milliseconds(),
+				HTTPStatus:    attempt.HTTPStatus,
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   attempt.Timestamp.Format(time.RFC3339Nano),
+				ElapsedMs:     attempt.Timestamp.Sub(runStart).Milliseconds(),
+			})
+		}
+
+		if outcome.Error != "" {
+			runtimeOutput.printCheckError(errors.New(outcome.Error))
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "run_result",
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Status:        "failure",
+				Error:         outcome.Error,
+				Alerted:       boolPtr(false),
+				ExitCode:      intPtr(exitFailure),
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
+				ElapsedMs:     time.Since(runStart).Milliseconds(),
+			})
 			os.Exit(exitFailure)
 		}
-		if shouldAlert(config.reverse, up) {
+
+		alerted := shouldAlert(config.reverse, outcome.Up)
+		if alerted {
 			beep.Emit()
-			if !config.quiet {
-				if config.reverse {
-					fmt.Println(outputColors.down(alertStateText(config.reverse)))
-				} else {
-					fmt.Println(outputColors.up(alertStateText(config.reverse)))
-				}
-			}
+			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "run_result",
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Status:        "success",
+				Up:            boolPtr(outcome.Up),
+				Alerted:       boolPtr(true),
+				ExitCode:      intPtr(exitSuccess),
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
+				ElapsedMs:     time.Since(runStart).Milliseconds(),
+			})
 			os.Exit(exitSuccess)
 		}
-		if !config.quiet {
-			if config.reverse {
-				fmt.Println(outputColors.up(waitingStateText(config.reverse)))
-			} else {
-				fmt.Println(outputColors.down(waitingStateText(config.reverse)))
-			}
-		}
+
+		runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
+		runtimeOutput.emitJSON(jsonEvent{
+			SchemaVersion: "1.0",
+			EventType:     "run_result",
+			Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+			Status:        "no_alert",
+			Up:            boolPtr(outcome.Up),
+			Alerted:       boolPtr(false),
+			ExitCode:      intPtr(exitFailure),
+			StartTime:     runStart.Format(time.RFC3339Nano),
+			CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
+			ElapsedMs:     time.Since(runStart).Milliseconds(),
+		})
 		os.Exit(exitFailure)
 	}
 
 	ticker := time.NewTicker(config.interval)
 	defer ticker.Stop()
 
+	pollAttempt := 0
 	for {
-		up, checkErr := checkable.CheckWithRetries(ctx, config.retries)
-		if checkErr == nil && shouldAlert(config.reverse, up) {
-			beep.Emit()
-			if !config.quiet {
-				if config.reverse {
-					fmt.Println(outputColors.down(alertStateText(config.reverse)))
-				} else {
-					fmt.Println(outputColors.up(alertStateText(config.reverse)))
-				}
+		pollAttempt++
+		outcome := detailedCheckable.CheckWithRetriesDetailed(ctx, config.retries)
+		for _, attempt := range outcome.Attempts {
+			errText := attempt.Error
+			if errText == "" && outcome.Error != "" {
+				errText = outcome.Error
 			}
+			runtimeOutput.printVerbose(verboseAttemptLine(pollAttempt, attempt, errText))
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "attempt",
+				Timestamp:     attempt.Timestamp.Format(time.RFC3339Nano),
+				Mode:          string(attempt.Mode),
+				Target:        attempt.Target,
+				PollAttempt:   pollAttempt,
+				RetryAttempt:  attempt.Retry,
+				RetryTotal:    attempt.MaxRetries,
+				Status:        attemptStatusText(attempt),
+				Error:         errText,
+				Up:            boolPtr(attempt.Up),
+				DurationMs:    attempt.Duration.Milliseconds(),
+				HTTPStatus:    attempt.HTTPStatus,
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   attempt.Timestamp.Format(time.RFC3339Nano),
+				ElapsedMs:     attempt.Timestamp.Sub(runStart).Milliseconds(),
+			})
+		}
+
+		if outcome.Error == "" && shouldAlert(config.reverse, outcome.Up) {
+			runtimeOutput.finishProgressLine()
+			beep.Emit()
+			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "run_result",
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Status:        "success",
+				Up:            boolPtr(outcome.Up),
+				Alerted:       boolPtr(true),
+				ExitCode:      intPtr(exitSuccess),
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
+				ElapsedMs:     time.Since(runStart).Milliseconds(),
+			})
 			os.Exit(exitSuccess)
 		}
 
-		if !config.quiet {
-			if checkErr != nil {
-				fmt.Printf("%s: %v\n", outputColors.waiting("still waiting"), checkErr)
-			} else {
-				if config.reverse {
-					fmt.Printf("%s: %s\n", outputColors.waiting("still waiting"), outputColors.up(waitingStateText(config.reverse)))
-				} else {
-					fmt.Printf("%s: %s\n", outputColors.waiting("still waiting"), outputColors.down(waitingStateText(config.reverse)))
-				}
+		if !runtimeOutput.quietHumanOutput && !runtimeOutput.jsonOutput {
+			latestAttempt := check.AttemptResult{Retry: 1, MaxRetries: config.retries + 1}
+			if len(outcome.Attempts) > 0 {
+				latestAttempt = outcome.Attempts[len(outcome.Attempts)-1]
 			}
+
+			waitingText := waitingStateText(config.reverse)
+			errText := outcome.Error
+			line := compactStatusLine(outputColors, runStart, time.Now().UTC(), pollAttempt, latestAttempt, waitingText, errText)
+			runtimeOutput.printCompactProgress(line)
 		}
 
 		select {
 		case <-ctx.Done():
+			runtimeOutput.finishProgressLine()
+			runtimeOutput.emitJSON(jsonEvent{
+				SchemaVersion: "1.0",
+				EventType:     "run_result",
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Status:        "cancelled",
+				Alerted:       boolPtr(false),
+				ExitCode:      intPtr(exitCancelled),
+				StartTime:     runStart.Format(time.RFC3339Nano),
+				CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
+				ElapsedMs:     time.Since(runStart).Milliseconds(),
+				Error:         ctx.Err().Error(),
+			})
 			os.Exit(exitCancelled)
 		case <-ticker.C:
 		}
