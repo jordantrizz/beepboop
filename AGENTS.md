@@ -23,7 +23,7 @@ Define execution ownership for building **beepboop**: a cross-platform terminal 
 **Mission:** Keep scope tight and usable.
 
 **Owns:**
-- CLI UX and flags (`--target`, `--mode`, `--interval`, `--timeout`, `--retries`, `--once`, `--status`, `--quiet`)
+- CLI UX and flags (`--target`, `--mode`, `--interval`, `--timeout`, `--retries`, `--once`, `--http-status`, `--quiet`)
 - Default runtime contract: run continuously until success unless `--once` is provided
 - Error messages and exit-code contract
 - MVP scope control (no extra features before Phase 3 gate)

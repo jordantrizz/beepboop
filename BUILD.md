@@ -50,7 +50,7 @@ Track the initial build/release implementation plan and completion status for `b
 **Status:** Complete
 
 - [x] Implement ICMP host checker
-- [x] Implement HTTP/HTTPS checker with status validation (`--status 200,204,...`)
+- [x] Implement HTTP/HTTPS checker with status validation (`--http-status 200,204,...`)
 - [x] Add target normalization (auto-detect URL vs host)
 - [x] Follow HTTP/HTTPS redirects by default (bounded redirect limit)
 - [x] Add retry/backoff behavior for transient failures

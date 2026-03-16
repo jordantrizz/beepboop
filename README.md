@@ -21,10 +21,14 @@ If you like any of the scripts or tools, please consider donating to help suppor
 - Checks websites with `http`/`https`
 - Checks TCP/UDP port connectivity with `tcp`/`udp`
 - Auto-detects host vs URL when `--mode auto` (default)
+- Auto-detects URL-like bare targets (for example `example.com/path`, `example.com:443`) as HTTP/HTTPS in `--mode auto`
 - **Multiple checks** — require ICMP + TCP ports + HTTP/HTTPS all to pass before signalling up (see `--checks`)
 - Follows HTTP redirects by default (bounded)
 - Runs until success by default (use `--once` for a single check)
 - Optional reverse mode alerts when the target goes down
+- Compact runtime progress includes start time, current time, elapsed time, poll attempt, and retry counters
+- Verbose diagnostics with `--verbose`
+- Machine-readable JSON lines with `--json`
 - Colorized terminal status output (with plain-text fallback)
 - Works across Linux, macOS, and Windows via Go cross-compilation
 
@@ -99,6 +103,8 @@ beepboop --target https://example.com --mode auto --once
 beepboop --target my-host.local --mode auto --interval 5s --timeout 3s
 ```
 
+When stdout is a TTY, polling status is updated on one compact line. In non-TTY output (for example redirected logs), each status update is printed on its own line.
+
 ### Keep polling until a host goes down
 
 ```bash
@@ -108,8 +114,16 @@ beepboop --target my-host.local --mode auto --reverse --interval 5s --timeout 3s
 ### HTTP status-code validation example
 
 ```bash
-beepboop --target https://example.com --mode auto --status 200,204 --once
+beepboop --target https://example.com --mode auto --http-status 200,204 --once
 ```
+
+### Monitor a 301 response explicitly
+
+```bash
+beepboop --target https://example.com --mode auto --http-status 301 --once
+```
+
+By default, HTTP/HTTPS checks consider only `200` as up. Use `--http-status` to monitor other codes such as `301`.
 
 ### Multiple checks — wait until ICMP + TCP ports are all up
 
@@ -137,16 +151,32 @@ Force plain output:
 beepboop --target https://example.com --once --no-color
 ```
 
+Verbose diagnostics (human-readable):
+
+```bash
+beepboop --target example.com:443 --mode auto --verbose
+```
+
+JSON lines output (machine-readable):
+
+```bash
+beepboop --target example.com/api/health --mode auto --json
+```
+
+`--json` emits one JSON object per line (for run start, each attempt, and final run result). When combined with `--quiet`, JSON output is still emitted while human-readable status lines remain suppressed.
+
 ## CLI Flags
 - `--target` target host, IP, or URL (required)
 - `--mode` `auto|icmp|http|https|tcp|udp` (default: `auto`; cannot be used with `--checks`)
 - `--checks` comma-separated check specs, e.g. `icmp,tcp:22,tcp:80` — all must pass for target to be considered up (uses `--target` as base host; cannot be used with `--mode` or `--port`)
 - `--interval` polling interval (default: `5s`)
-- `--timeout` per-check timeout (default: `3s`)
+- `--timeout` per-check timeout (default: `3s`; defaults to `30s` when checking HTTP/HTTPS unless explicitly set)
 - `--retries` extra retry attempts per poll cycle (default: `0`)
 - `--once` perform one check and exit
 - `--reverse` alert when the target is down instead of up
-- `--status` expected HTTP status codes, comma-separated (for HTTP/HTTPS checks)
+- `--http-status` expected HTTP status codes, comma-separated (for HTTP/HTTPS checks; default up status is `200`)
+- `--verbose` print per-attempt diagnostics (mode, target, status/error, retry details)
+- `--json` emit structured JSON lines for run start, attempts, and final result
 - `--quiet` suppress non-essential output
 - `--no-color` force plain output (disable ANSI colors)
 
