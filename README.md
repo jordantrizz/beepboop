@@ -69,6 +69,8 @@ go install github.com/jordantrizz/beepboop/cmd/beepboop@latest
 
 Make sure your Go bin directory is in `PATH` (commonly `$(go env GOPATH)/bin` or `$(go env GOBIN)`).
 
+Releases are published as `v`-prefixed tags (`v0.1.0` … `v0.2.3`). To install a specific release, pin the tag (for example `@v0.2.3`). If `@latest` returns a `v0.0.0-<timestamp>-<hash>` pseudo-version, the public module proxy has not picked up the newest tag yet — pin the release tag, or bypass the cache with `GOPROXY=direct go install github.com/jordantrizz/beepboop/cmd/beepboop@latest`.
+
 ### Option 3: Build from source
 
 ```bash
@@ -116,11 +118,13 @@ sha256sum -c checksums.txt --ignore-missing
 
 ### Upgrade with Go
 
-Re-run the install command to fetch the latest tagged version:
+Re-run the install command to fetch the latest tagged release:
 
 ```bash
 go install github.com/jordantrizz/beepboop/cmd/beepboop@latest
 ```
+
+To move to a specific version, pin the `v` tag (for example `@v0.2.3`), then confirm with `beepboop --version`. If `@latest` still resolves to a pseudo-version, see the proxy note under [Option 2](#option-2-install-with-go).
 
 ### Upgrade a source build
 

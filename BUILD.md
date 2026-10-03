@@ -105,6 +105,8 @@ Track the initial build/release implementation plan and completion status for `b
 **Exit criteria:**
 - [x] Tagging `vX.Y.Z` publishes complete release assets automatically
 
+> **Tag convention:** release tags must be `v`-prefixed (`vX.Y.Z`). Go modules only recognise `v`-prefixed semver tags, so bare tags (for example `0.2.3`) leave `go install …@latest` stuck on a `v0.0.0-<timestamp>-<hash>` pseudo-version. The release workflow trigger, asset names, and the `VERSION` comparison all assume the `v` prefix. Existing releases were backfilled with matching `v` tags.
+
 ---
 
 ## Initial Build Milestones
