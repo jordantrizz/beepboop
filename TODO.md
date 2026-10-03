@@ -2,23 +2,23 @@
 Track remaining work only. Initial build implementation history lives in `BUILD.md`.
 
 ## Small Changes
-- [ ] Compact runtime progress display
-	- [ ] Track and display run `start time`
-	- [ ] Track and display `current time` and `elapsed duration`
-	- [ ] Track and display check attempts and retry counts in a compact single-line status view
-	- [ ] Ensure progress output works cleanly in both TTY and non-TTY environments
+- [x] Compact runtime progress display
+	- [x] Track and display run `start time`
+	- [x] Track and display `current time` and `elapsed duration`
+	- [x] Track and display check attempts and retry counts in a compact single-line status view
+	- [x] Ensure progress output works cleanly in both TTY and non-TTY environments
 
-- [ ] Smarter auto-detection for target input
-	- [ ] Keep explicit `http://` and `https://` targets mapped to HTTP/HTTPS mode
-	- [ ] Detect plain IP/hostname targets and map to ICMP mode
-	- [ ] Detect URL-like bare targets (e.g. domain/path, domain:port) and default to HTTP/HTTPS mode
-	- [ ] Add tests covering ambiguous and edge-case targets
+- [x] Smarter auto-detection for target input
+	- [x] Keep explicit `http://` and `https://` targets mapped to HTTP/HTTPS mode
+	- [x] Detect plain IP/hostname targets and map to ICMP mode
+	- [x] Detect URL-like bare targets (e.g. domain/path, domain:port) and default to HTTP/HTTPS mode
+	- [x] Add tests covering ambiguous and edge-case targets
 
-- [ ] Verbose and machine-readable output
-	- [ ] Add `--verbose` mode with per-attempt diagnostic details (mode, resolved target, status/error, retry info)
-	- [ ] Add `--json` output mode for structured logs/results
-	- [ ] Define and document JSON schema fields for single-check and run-until-success flows
-	- [ ] Add tests validating JSON output format and key fields
+- [x] Verbose and machine-readable output
+	- [x] Add `--verbose` mode with per-attempt diagnostic details (mode, resolved target, status/error, retry info)
+	- [x] Add `--json` output mode for structured logs/results
+	- [x] Define and document JSON schema fields for single-check and run-until-success flows
+	- [x] Add tests validating JSON output format and key fields
 
 ## Unfinished Build Items
 - [ ] Add `scripts/dev.ps1` equivalent for Windows contributors
@@ -35,6 +35,6 @@ Track remaining work only. Initial build implementation history lives in `BUILD.
 
 ## Backlog (Post-MVP)
 - [ ] Config file support (`beepboop.yaml`)
-- [ ] Notification adapters beyond terminal beep (desktop/webhook)
+- [ ] Notification adapters beyond terminal beep (desktop/webhook/slack/gotify/etc.)
 - [ ] Homebrew/Scoop/package manager distribution
 - [ ] Optional install script for latest release
