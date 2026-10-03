@@ -27,6 +27,7 @@ If you like any of the scripts or tools, please consider donating to help suppor
 - Runs until success by default (use `--once` for a single check)
 - Optional reverse mode alerts when the target goes down
 - Compact runtime progress includes start time, current time, elapsed time, poll attempt, and retry counters
+- Tracks waiting-state time — each waiting line shows `since=` and `waiting=`, and the final status reports total time spent down (or up in `--reverse`); disable with `--no-timing`
 - Verbose diagnostics with `--verbose`
 - Machine-readable JSON lines with `--json`
 - Colorized terminal status output (with plain-text fallback)
@@ -77,6 +78,58 @@ VERSION=$(tr -d '[:space:]' < VERSION)
 go build -ldflags "-X main.version=${VERSION}" -o beepboop ./cmd/beepboop
 ```
 
+## Upgrading
+
+Check the version you currently have:
+
+```bash
+beepboop --version
+```
+
+### Upgrade a release binary
+
+Replace the installed binary with the latest release asset for your OS/architecture, then verify.
+
+Linux/macOS (`tar.gz`):
+
+```bash
+curl -L -o beepboop.tar.gz <RELEASE_ASSET_URL>
+tar -xzf beepboop.tar.gz
+chmod +x beepboop-*
+sudo mv beepboop-* /usr/local/bin/beepboop
+beepboop --version
+```
+
+Windows PowerShell (`zip`) — `-Force` overwrites the previous extraction:
+
+```powershell
+Invoke-WebRequest -Uri <RELEASE_ASSET_URL> -OutFile beepboop.zip
+Expand-Archive -Path .\beepboop.zip -DestinationPath .\beepboop -Force
+.\beepboop\beepboop-*.exe --version
+```
+
+`<RELEASE_ASSET_URL>` is the asset from the latest GitHub Release (for example `beepboop-v0.2.2-linux-amd64.tar.gz`). Each release also publishes a `checksums.txt`; download it alongside the archive and verify before replacing the binary:
+
+```bash
+sha256sum -c checksums.txt --ignore-missing
+```
+
+### Upgrade with Go
+
+Re-run the install command to fetch the latest tagged version:
+
+```bash
+go install github.com/jordantrizz/beepboop/cmd/beepboop@latest
+```
+
+### Upgrade a source build
+
+```bash
+git pull
+VERSION=$(tr -d '[:space:]' < VERSION)
+go build -ldflags "-X main.version=${VERSION}" -o beepboop ./cmd/beepboop
+```
+
 ## Usage
 
 ### Verify installation
@@ -104,6 +157,8 @@ beepboop --target my-host.local --mode auto --interval 5s --timeout 3s
 ```
 
 When stdout is a TTY, polling status is updated on one compact line. In non-TTY output (for example redirected logs), each status update is printed on its own line.
+
+While the target is down, each status line includes `since=<timestamp>` (when the waiting state began) and `waiting=<duration>` (how long it has been down so far). When the target comes up, the final line reports the total, for example `target is up after being down for 12.3s (since 2026-10-03T09:13:17Z)`. In `--reverse`, the same tracking mirrors the waiting state (time observed up). Pass `--no-timing` to suppress all timing tokens.
 
 ### Keep polling until a host goes down
 
@@ -179,6 +234,7 @@ beepboop --target example.com/api/health --mode auto --json
 - `--json` emit structured JSON lines for run start, attempts, and final result
 - `--quiet` suppress non-essential output
 - `--no-color` force plain output (disable ANSI colors)
+- `--no-timing` suppress all timing tokens (`start=`/`now=`/`elapsed=`/`since=`/`waiting=`) and the total waiting time in the final status
 
 ### `--checks` spec format
 

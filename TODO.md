@@ -20,6 +20,12 @@ Track remaining work only. Initial build implementation history lives in `BUILD.
 	- [x] Define and document JSON schema fields for single-check and run-until-success flows
 	- [x] Add tests validating JSON output format and key fields
 
+- [x] Down-time tracking and `--no-timing`
+	- [x] Track time the target is observed down (or up in `--reverse`) with a `since=` timestamp and running `waiting=` duration on waiting lines
+	- [x] Report total time observed down in the final status message and the JSON `run_result`
+	- [x] Add `waiting_state`/`waiting_since`/`waiting_elapsed_ms` JSON fields
+	- [x] Add `--no-timing` flag to disable all timing output
+
 ## Unfinished Build Items
 - [ ] Add `scripts/dev.ps1` equivalent for Windows contributors
 - [ ] Make smoke test network-independent in CI (local test target instead of external site)

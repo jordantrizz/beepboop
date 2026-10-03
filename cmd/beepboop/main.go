@@ -91,6 +91,7 @@ type cliConfig struct {
 	jsonOutput  bool
 	quiet       bool
 	noColor     bool
+	noTiming    bool
 }
 
 const (
@@ -178,6 +179,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	flagSet.BoolVar(&config.jsonOutput, "json", false, "Output structured JSON lines")
 	flagSet.BoolVar(&config.quiet, "quiet", false, "Suppress non-essential output")
 	flagSet.BoolVar(&config.noColor, "no-color", false, "Disable colored output")
+	flagSet.BoolVar(&config.noTiming, "no-timing", false, "Disable timing in output")
 	if err := flagSet.Parse(args); err != nil {
 		return config, err
 	}
@@ -282,11 +284,53 @@ func waitingStateText(reverse bool) string {
 	return "target is down"
 }
 
+// waitingElapsed returns the time spent in the waiting state since the given
+// timestamp, or zero when no waiting state has been observed yet.
+func waitingElapsed(since time.Time, until time.Time) time.Duration {
+	if since.IsZero() {
+		return 0
+	}
+	return until.Sub(since)
+}
+
+// describeWaiting renders a human summary of the time spent in the waiting
+// state, for example "down for 12.3s (since 2026-10-03T09:13:17Z)". It returns
+// an empty string when no waiting state was observed.
+func describeWaiting(reverse bool, since time.Time, until time.Time) string {
+	if since.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s for %s (since %s)",
+		waitingStateName(reverse),
+		waitingElapsed(since, until).Round(time.Millisecond),
+		since.Format(time.RFC3339),
+	)
+}
+
+// withWaitingSummary appends a waiting summary to a terminal status line.
+func withWaitingSummary(text string, summary string) string {
+	if summary == "" {
+		return text
+	}
+	return fmt.Sprintf("%s after being %s", text, summary)
+}
+
 func shouldAlert(reverse bool, up bool) bool {
 	if reverse {
 		return !up
 	}
 	return up
+}
+
+// waitingStateName returns the state the program waits in: "down" while waiting
+// for a target to come up (normal mode), "up" while waiting for a target to go
+// down (reverse mode).
+func waitingStateName(reverse bool) string {
+	if reverse {
+		return "up"
+	}
+	return "down"
 }
 
 type runtimeOutput struct {
@@ -295,45 +339,50 @@ type runtimeOutput struct {
 	quietHumanOutput bool
 	verbose          bool
 	jsonOutput       bool
+	timing           bool
 	compactActive    bool
 }
 
 type jsonEvent struct {
-	SchemaVersion string `json:"schema_version"`
-	EventType     string `json:"event_type"`
-	Timestamp     string `json:"timestamp"`
-	RunMode       string `json:"run_mode,omitempty"`
-	AlertOn       string `json:"alert_on,omitempty"`
-	Mode          string `json:"mode,omitempty"`
-	Target        string `json:"target,omitempty"`
-	Checks        string `json:"checks,omitempty"`
-	PollAttempt   int    `json:"poll_attempt,omitempty"`
-	RetryAttempt  int    `json:"retry_attempt,omitempty"`
-	RetryTotal    int    `json:"retry_total,omitempty"`
-	Status        string `json:"status,omitempty"`
-	Error         string `json:"error,omitempty"`
-	Up            *bool  `json:"up,omitempty"`
-	Alerted       *bool  `json:"alerted,omitempty"`
-	StartTime     string `json:"start_time,omitempty"`
-	CurrentTime   string `json:"current_time,omitempty"`
-	ElapsedMs     int64  `json:"elapsed_ms,omitempty"`
-	DurationMs    int64  `json:"duration_ms,omitempty"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	Interval      string `json:"interval,omitempty"`
-	Timeout       string `json:"timeout,omitempty"`
-	Retries       int    `json:"retries,omitempty"`
-	Once          *bool  `json:"once,omitempty"`
-	Reverse       *bool  `json:"reverse,omitempty"`
-	ExitCode      *int   `json:"exit_code,omitempty"`
+	SchemaVersion    string `json:"schema_version"`
+	EventType        string `json:"event_type"`
+	Timestamp        string `json:"timestamp"`
+	RunMode          string `json:"run_mode,omitempty"`
+	AlertOn          string `json:"alert_on,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	Target           string `json:"target,omitempty"`
+	Checks           string `json:"checks,omitempty"`
+	PollAttempt      int    `json:"poll_attempt,omitempty"`
+	RetryAttempt     int    `json:"retry_attempt,omitempty"`
+	RetryTotal       int    `json:"retry_total,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Error            string `json:"error,omitempty"`
+	Up               *bool  `json:"up,omitempty"`
+	Alerted          *bool  `json:"alerted,omitempty"`
+	StartTime        string `json:"start_time,omitempty"`
+	CurrentTime      string `json:"current_time,omitempty"`
+	ElapsedMs        int64  `json:"elapsed_ms,omitempty"`
+	WaitingState     string `json:"waiting_state,omitempty"`
+	WaitingSince     string `json:"waiting_since,omitempty"`
+	WaitingElapsedMs int64  `json:"waiting_elapsed_ms,omitempty"`
+	DurationMs       int64  `json:"duration_ms,omitempty"`
+	HTTPStatus       int    `json:"http_status,omitempty"`
+	Interval         string `json:"interval,omitempty"`
+	Timeout          string `json:"timeout,omitempty"`
+	Retries          int    `json:"retries,omitempty"`
+	Once             *bool  `json:"once,omitempty"`
+	Reverse          *bool  `json:"reverse,omitempty"`
+	ExitCode         *int   `json:"exit_code,omitempty"`
 }
 
-func newRuntimeOutput(colors colorizer, quiet bool, verbose bool, jsonOutput bool) runtimeOutput {
+func newRuntimeOutput(colors colorizer, quiet bool, verbose bool, jsonOutput bool, timing bool) runtimeOutput {
 	return runtimeOutput{
 		colorizer:        colors,
 		isTTY:            stdoutIsTTY(),
 		quietHumanOutput: quiet,
 		verbose:          verbose,
 		jsonOutput:       jsonOutput,
+		timing:           timing,
 	}
 }
 
@@ -352,7 +401,7 @@ func (value *runtimeOutput) printHeader(line string) {
 	fmt.Println(line)
 }
 
-func (value *runtimeOutput) printTerminalStatus(reverse bool, up bool) {
+func (value *runtimeOutput) printTerminalStatus(reverse bool, up bool, waitingSummary string) {
 	if value.jsonOutput || value.quietHumanOutput {
 		return
 	}
@@ -361,11 +410,11 @@ func (value *runtimeOutput) printTerminalStatus(reverse bool, up bool) {
 			fmt.Println(value.colorizer.up(waitingStateText(reverse)))
 			return
 		}
-		fmt.Println(value.colorizer.down(alertStateText(reverse)))
+		fmt.Println(value.colorizer.down(withWaitingSummary(alertStateText(reverse), waitingSummary)))
 		return
 	}
 	if up {
-		fmt.Println(value.colorizer.up(alertStateText(reverse)))
+		fmt.Println(value.colorizer.up(withWaitingSummary(alertStateText(reverse), waitingSummary)))
 		return
 	}
 	fmt.Println(value.colorizer.down(waitingStateText(reverse)))
@@ -430,7 +479,7 @@ func intPtr(input int) *int {
 	return &value
 }
 
-func compactStatusLine(colors colorizer, start time.Time, now time.Time, pollAttempt int, attempt check.AttemptResult, waitingText string, errText string) string {
+func compactStatusLine(colors colorizer, timing bool, waitingSince time.Time, start time.Time, now time.Time, pollAttempt int, attempt check.AttemptResult, waitingText string, errText string) string {
 	status := "down"
 	if attempt.Up {
 		status = "up"
@@ -441,15 +490,29 @@ func compactStatusLine(colors colorizer, start time.Time, now time.Time, pollAtt
 
 	prefix := colors.waiting("still waiting")
 	core := fmt.Sprintf(
-		"start=%s now=%s elapsed=%s poll=%d retry=%d/%d status=%s",
-		start.Format(time.RFC3339),
-		now.Format(time.RFC3339),
-		now.Sub(start).Round(time.Millisecond),
+		"poll=%d retry=%d/%d status=%s",
 		pollAttempt,
 		attempt.Retry,
 		attempt.MaxRetries,
 		status,
 	)
+	if timing {
+		timingParts := fmt.Sprintf(
+			"start=%s now=%s elapsed=%s",
+			start.Format(time.RFC3339),
+			now.Format(time.RFC3339),
+			now.Sub(start).Round(time.Millisecond),
+		)
+		if !waitingSince.IsZero() {
+			timingParts = fmt.Sprintf(
+				"%s since=%s waiting=%s",
+				timingParts,
+				waitingSince.Format(time.RFC3339),
+				waitingElapsed(waitingSince, now).Round(time.Millisecond),
+			)
+		}
+		core = timingParts + " " + core
+	}
 
 	if errText != "" {
 		return fmt.Sprintf("%s %s err=%q", prefix, core, errText)
@@ -523,7 +586,7 @@ func main() {
 	}
 
 	outputColors := newColorizer(config.noColor)
-	runtimeOutput := newRuntimeOutput(outputColors, config.quiet, config.verbose, config.jsonOutput)
+	runtimeOutput := newRuntimeOutput(outputColors, config.quiet, config.verbose, config.jsonOutput, !config.noTiming)
 
 	resolvedMode := check.Mode("")
 	normalizedTarget := ""
@@ -647,7 +710,7 @@ func main() {
 		alerted := shouldAlert(config.reverse, outcome.Up)
 		if alerted {
 			beep.Emit()
-			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
+			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up, "")
 			runtimeOutput.emitJSON(jsonEvent{
 				SchemaVersion: "1.0",
 				EventType:     "run_result",
@@ -663,7 +726,7 @@ func main() {
 			os.Exit(exitSuccess)
 		}
 
-		runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
+		runtimeOutput.printTerminalStatus(config.reverse, outcome.Up, "")
 		runtimeOutput.emitJSON(jsonEvent{
 			SchemaVersion: "1.0",
 			EventType:     "run_result",
@@ -683,16 +746,20 @@ func main() {
 	defer ticker.Stop()
 
 	pollAttempt := 0
+	var waitingSince time.Time
 	for {
 		pollAttempt++
 		outcome := detailedCheckable.CheckWithRetriesDetailed(ctx, config.retries)
+		if waitingSince.IsZero() && len(outcome.Attempts) > 0 {
+			waitingSince = outcome.Attempts[0].Timestamp
+		}
 		for _, attempt := range outcome.Attempts {
 			errText := attempt.Error
 			if errText == "" && outcome.Error != "" {
 				errText = outcome.Error
 			}
 			runtimeOutput.printVerbose(verboseAttemptLine(pollAttempt, attempt, errText))
-			runtimeOutput.emitJSON(jsonEvent{
+			event := jsonEvent{
 				SchemaVersion: "1.0",
 				EventType:     "attempt",
 				Timestamp:     attempt.Timestamp.Format(time.RFC3339Nano),
@@ -709,25 +776,40 @@ func main() {
 				StartTime:     runStart.Format(time.RFC3339Nano),
 				CurrentTime:   attempt.Timestamp.Format(time.RFC3339Nano),
 				ElapsedMs:     attempt.Timestamp.Sub(runStart).Milliseconds(),
-			})
+			}
+			if runtimeOutput.timing && !waitingSince.IsZero() {
+				event.WaitingState = waitingStateName(config.reverse)
+				event.WaitingSince = waitingSince.Format(time.RFC3339Nano)
+				event.WaitingElapsedMs = attempt.Timestamp.Sub(waitingSince).Milliseconds()
+			}
+			runtimeOutput.emitJSON(event)
 		}
 
 		if outcome.Error == "" && shouldAlert(config.reverse, outcome.Up) {
 			runtimeOutput.finishProgressLine()
 			beep.Emit()
-			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up)
-			runtimeOutput.emitJSON(jsonEvent{
+			resultTime := time.Now().UTC()
+			waitingSummary := ""
+			resultEvent := jsonEvent{
 				SchemaVersion: "1.0",
 				EventType:     "run_result",
-				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+				Timestamp:     resultTime.Format(time.RFC3339Nano),
 				Status:        "success",
 				Up:            boolPtr(outcome.Up),
 				Alerted:       boolPtr(true),
 				ExitCode:      intPtr(exitSuccess),
 				StartTime:     runStart.Format(time.RFC3339Nano),
-				CurrentTime:   time.Now().UTC().Format(time.RFC3339Nano),
-				ElapsedMs:     time.Since(runStart).Milliseconds(),
-			})
+				CurrentTime:   resultTime.Format(time.RFC3339Nano),
+				ElapsedMs:     resultTime.Sub(runStart).Milliseconds(),
+			}
+			if runtimeOutput.timing && !waitingSince.IsZero() {
+				waitingSummary = describeWaiting(config.reverse, waitingSince, resultTime)
+				resultEvent.WaitingState = waitingStateName(config.reverse)
+				resultEvent.WaitingSince = waitingSince.Format(time.RFC3339Nano)
+				resultEvent.WaitingElapsedMs = resultTime.Sub(waitingSince).Milliseconds()
+			}
+			runtimeOutput.printTerminalStatus(config.reverse, outcome.Up, waitingSummary)
+			runtimeOutput.emitJSON(resultEvent)
 			os.Exit(exitSuccess)
 		}
 
@@ -739,7 +821,7 @@ func main() {
 
 			waitingText := waitingStateText(config.reverse)
 			errText := outcome.Error
-			line := compactStatusLine(outputColors, runStart, time.Now().UTC(), pollAttempt, latestAttempt, waitingText, errText)
+			line := compactStatusLine(outputColors, runtimeOutput.timing, waitingSince, runStart, time.Now().UTC(), pollAttempt, latestAttempt, waitingText, errText)
 			runtimeOutput.printCompactProgress(line)
 		}
 
